@@ -15857,3 +15857,157 @@ TEST_F(VkPositiveLayerTest, TestPervertexNVShaderAttributes) {
     pipe.CreateGraphicsPipeline();
     m_errorMonitor->VerifyNotFound();
 }
+
+TEST_F(VkPositiveLayerTest, BufferDeviceAddress) {
+    SetTargetApiVersion(VK_API_VERSION_1_1);
+    bool supported = InstanceExtensionSupported(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    m_instance_extension_names.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+
+    ASSERT_NO_FATAL_FAILURE(InitFramework());
+    if (IsPlatform(kMockICD) || DeviceSimulation()) {
+        printf("%s This test requires a driver that can draw.\n", kSkipPrefix);
+        return;
+    }
+
+    supported = supported && DeviceExtensionSupported(gpu(), nullptr, VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+    m_device_extension_names.push_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+
+    VkPhysicalDeviceFeatures2KHR features2 = {};
+    auto bda_features = LvlInitStruct<VkPhysicalDeviceBufferDeviceAddressFeaturesKHR>();
+    PFN_vkGetPhysicalDeviceFeatures2KHR vkGetPhysicalDeviceFeatures2KHR =
+        (PFN_vkGetPhysicalDeviceFeatures2KHR)vk::GetInstanceProcAddr(instance(), "vkGetPhysicalDeviceFeatures2KHR");
+    ASSERT_TRUE(vkGetPhysicalDeviceFeatures2KHR != nullptr);
+
+    features2 = LvlInitStruct<VkPhysicalDeviceFeatures2KHR>(&bda_features);
+    vkGetPhysicalDeviceFeatures2KHR(gpu(), &features2);
+    supported = supported && bda_features.bufferDeviceAddress;
+
+    if (!supported) {
+        printf("%s Buffer Device Address feature not supported, skipping test\n", kSkipPrefix);
+        return;
+    }
+
+    m_errorMonitor->ExpectSuccess();
+    ASSERT_NO_FATAL_FAILURE(InitState(nullptr, &features2));
+    ASSERT_NO_FATAL_FAILURE(InitViewport());
+    ASSERT_NO_FATAL_FAILURE(InitRenderTarget());
+
+    // Make a uniform buffer to be passed to the shader that contains the pointer and write count
+    uint32_t qfi = 0;
+    VkBufferCreateInfo bci = {};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+    bci.size = 8;  // 64 bit pointer
+    bci.queueFamilyIndexCount = 1;
+    bci.pQueueFamilyIndices = &qfi;
+    VkBufferObj buffer0;
+    VkMemoryPropertyFlags mem_props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    buffer0.init(*m_device, bci, mem_props);
+
+    // Make another buffer to write to
+    bci.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR;
+    bci.size = 64;
+    VkBuffer buffer1;
+    vk::CreateBuffer(device(), &bci, NULL, &buffer1);
+    VkMemoryRequirements buffer_mem_reqs = {};
+    vk::GetBufferMemoryRequirements(device(), buffer1, &buffer_mem_reqs);
+    VkMemoryAllocateInfo buffer_alloc_info = {};
+    buffer_alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    buffer_alloc_info.allocationSize = buffer_mem_reqs.size;
+    m_device->phy().set_memory_type(buffer_mem_reqs.memoryTypeBits, &buffer_alloc_info, (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT));
+    VkMemoryAllocateFlagsInfo alloc_flags = { VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO };
+    alloc_flags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT_KHR;
+    buffer_alloc_info.pNext = &alloc_flags;
+    VkDeviceMemory buffer_mem;
+    VkResult err = vk::AllocateMemory(device(), &buffer_alloc_info, NULL, &buffer_mem);
+    ASSERT_VK_SUCCESS(err);
+    vk::BindBufferMemory(m_device->device(), buffer1, buffer_mem, 0);
+
+    // Get device address of buffer to write to
+    VkBufferDeviceAddressInfoKHR bda_info = {};
+    bda_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO_KHR;
+    bda_info.buffer = buffer1;
+    auto vkGetBufferDeviceAddressKHR =
+        (PFN_vkGetBufferDeviceAddressKHR)vk::GetDeviceProcAddr(m_device->device(), "vkGetBufferDeviceAddressKHR");
+    ASSERT_TRUE(vkGetBufferDeviceAddressKHR != nullptr);
+    auto pBuffer = vkGetBufferDeviceAddressKHR(m_device->device(), &bda_info);
+
+    OneOffDescriptorSet descriptor_set(m_device, { {0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_ALL, nullptr} });
+
+    const VkPipelineLayoutObj pipeline_layout(m_device, { &descriptor_set.layout_ });
+    VkDescriptorBufferInfo buffer_test_buffer_info[2] = {};
+    buffer_test_buffer_info[0].buffer = buffer0.handle();
+    buffer_test_buffer_info[0].offset = 0;
+    buffer_test_buffer_info[0].range = sizeof(uint32_t);
+
+    VkWriteDescriptorSet descriptor_writes[1] = {};
+    descriptor_writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    descriptor_writes[0].dstSet = descriptor_set.set_;
+    descriptor_writes[0].dstBinding = 0;
+    descriptor_writes[0].descriptorCount = 1;
+    descriptor_writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    descriptor_writes[0].pBufferInfo = buffer_test_buffer_info;
+    vk::UpdateDescriptorSets(m_device->device(), 1, descriptor_writes, 0, NULL);
+
+    char const *shader_source =
+        "#version 450\n"
+        "#extension GL_EXT_buffer_reference : enable\n "
+        "layout(buffer_reference, buffer_reference_align = 16) buffer bufStruct;\n"
+        "layout(set = 0, binding = 0) uniform ufoo {\n"
+        "    bufStruct data;\n"
+        "} u_info;\n"
+        "layout(buffer_reference, std140) buffer bufStruct {\n"
+        "    int a[4];\n"
+        "};\n"
+        "void main() {\n"
+        "    u_info.data.a[0] = 0xba5eba11;\n"
+        "}\n";
+    VkShaderObj vs(m_device, shader_source, VK_SHADER_STAGE_VERTEX_BIT, this, "main", true);
+
+    VkViewport viewport = m_viewports[0];
+    VkRect2D scissors = m_scissors[0];
+
+    VkSubmitInfo submit_info = {};
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &m_commandBuffer->handle();
+
+    VkPipelineObj pipe(m_device);
+    pipe.AddShader(&vs);
+    pipe.AddDefaultColorAttachment();
+    err = pipe.CreateVKPipeline(pipeline_layout.handle(), renderPass());
+    ASSERT_VK_SUCCESS(err);
+
+    VkCommandBufferBeginInfo begin_info = {};
+    VkCommandBufferInheritanceInfo hinfo = {};
+    hinfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO;
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.pInheritanceInfo = &hinfo;
+
+    m_commandBuffer->begin(&begin_info);
+    m_commandBuffer->BeginRenderPass(m_renderPassBeginInfo);
+    vk::CmdBindPipeline(m_commandBuffer->handle(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipe.handle());
+    vk::CmdBindDescriptorSets(m_commandBuffer->handle(), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout.handle(), 0, 1,
+        &descriptor_set.set_, 0, nullptr);
+    vk::CmdSetViewport(m_commandBuffer->handle(), 0, 1, &viewport);
+    vk::CmdSetScissor(m_commandBuffer->handle(), 0, 1, &scissors);
+    vk::CmdDraw(m_commandBuffer->handle(), 3, 1, 0, 0);
+    vk::CmdEndRenderPass(m_commandBuffer->handle());
+    m_commandBuffer->end();
+
+    VkDeviceAddress *data = (VkDeviceAddress *)buffer0.memory().map();
+    data[0] = pBuffer;
+    buffer0.memory().unmap();
+    err = vk::QueueSubmit(m_device->m_queue, 1, &submit_info, VK_NULL_HANDLE);
+    ASSERT_VK_SUCCESS(err);
+    err = vk::QueueWaitIdle(m_device->m_queue);
+    ASSERT_VK_SUCCESS(err);
+    vk::MapMemory(m_device->handle(), buffer_mem, 0, VK_WHOLE_SIZE, 0, (void **)&data);
+    if (data[0] != 0xba5eba11) {
+        ADD_FAILURE() << "Buffer contents were " << data[0] << " when 0xba5eba11 was expected";
+    }
+    vk::UnmapMemory(m_device->handle(), buffer_mem);
+    m_errorMonitor->VerifyNotFound();
+    vk::DestroyBuffer(m_device->handle(), buffer1, nullptr);
+    vk::FreeMemory(m_device->handle(), buffer_mem, nullptr);
+}
