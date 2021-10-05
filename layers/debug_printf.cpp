@@ -35,6 +35,14 @@ void DebugPrintf::ReportSetupProblem(T object, const char *const specific_messag
     LogError(object, "UNASSIGNED-DEBUG-PRINTF ", "Detail: (%s)", specific_message);
 }
 
+VkResult DebugPrintf::MapBufferMemory(DPFDeviceMemoryBlock memory_block, void **data_ptr) const {
+    return vmaMapMemory(vmaAllocator, memory_block.allocation, data_ptr);
+}
+
+void DebugPrintf::UnmapBufferMemory(DPFDeviceMemoryBlock memory_block) const {
+    vmaUnmapMemory(vmaAllocator, memory_block.allocation);
+}
+
 // Turn on necessary device features.
 void DebugPrintf::PreCallRecordCreateDevice(VkPhysicalDevice gpu, const VkDeviceCreateInfo *create_info,
                                             const VkAllocationCallbacks *pAllocator, VkDevice *pDevice,

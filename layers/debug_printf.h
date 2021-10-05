@@ -106,6 +106,8 @@ class DebugPrintf : public ValidationStateTracker {
 
     template <typename T>
     void ReportSetupProblem(T object, const char* const specific_message) const;
+    VkResult MapBufferMemory(DPFDeviceMemoryBlock memory_block, void** data_ptr) const;
+    void UnmapBufferMemory(DPFDeviceMemoryBlock memory_block) const;
     void PreCallRecordCreateDevice(VkPhysicalDevice gpu, const VkDeviceCreateInfo* pCreateInfo,
                                    const VkAllocationCallbacks* pAllocator, VkDevice* pDevice, void* modified_create_info) override;
     void PostCallRecordCreateDevice(VkPhysicalDevice gpu, const VkDeviceCreateInfo* pCreateInfo,

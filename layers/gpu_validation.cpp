@@ -190,6 +190,61 @@ void GpuAssisted::ReportSetupProblem(T object, const char *const specific_messag
     LogError(object, "UNASSIGNED-GPU-Assisted Validation Error. ", "Detail: (%s)", specific_message);
 }
 
+VkResult GpuAssisted::CreateBuffer(GpuAssistedDeviceMemoryBlock &memory_block, VkBufferCreateInfo buffer_info,
+                                   VmaAllocationCreateInfo alloc_info, uint32_t mem_type_index) const {
+    VkResult result = VK_SUCCESS;
+    if (use_vma) {
+        result = vmaCreateBuffer(vmaAllocator, &buffer_info, &alloc_info, &memory_block.buffer, &memory_block.allocation, nullptr);
+    } else {
+        VkMemoryRequirements mem_reqs = {};
+        result = DispatchCreateBuffer(device, &buffer_info, nullptr, &memory_block.buffer);
+        if (result != VK_SUCCESS) {
+            ReportSetupProblem(device, "Unable to create a buffer.  Device could become unstable.");
+            return result;
+        }
+        DispatchGetBufferMemoryRequirements(device, memory_block.buffer, &mem_reqs);
+        VkMemoryAllocateInfo mem_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mem_info.allocationSize = mem_reqs.size;
+        mem_info.memoryTypeIndex = mem_type_index;
+        result = DispatchAllocateMemory(device, &mem_info, nullptr, &memory_block.memory);
+        if (result != VK_SUCCESS) {
+            ReportSetupProblem(device, "Unable to allocate device memory.  Device could become unstable.");
+            return result;
+        }
+        result = DispatchBindBufferMemory(device, memory_block.buffer, memory_block.memory, 0);
+        if (result != VK_SUCCESS) {
+            ReportSetupProblem(device, "Unable to bind device memory.  Device could become unstable.");
+            return result;
+        }
+    }
+    return result;
+}
+
+VkResult GpuAssisted::MapBufferMemory(GpuAssistedDeviceMemoryBlock memory_block, void **data_ptr) const {
+    if (use_vma) {
+        return vmaMapMemory(vmaAllocator, memory_block.allocation, data_ptr);
+    } else {
+        return DispatchMapMemory(device, memory_block.memory, 0, VK_WHOLE_SIZE, 0, data_ptr);
+    }
+}
+
+void GpuAssisted::UnmapBufferMemory(GpuAssistedDeviceMemoryBlock memory_block) const {
+    if (use_vma) {
+        vmaUnmapMemory(vmaAllocator, memory_block.allocation);
+    } else {
+        DispatchUnmapMemory(device, memory_block.memory);
+    }
+}
+
+void GpuAssisted::DestroyBuffer(GpuAssistedDeviceMemoryBlock memory_block) const {
+    if (use_vma) {
+        vmaDestroyBuffer(vmaAllocator, memory_block.buffer, memory_block.allocation);
+    } else {
+        DispatchDestroyBuffer(device, memory_block.buffer, nullptr);
+        DispatchFreeMemory(device, memory_block.memory, nullptr);
+    }
+}
+
 bool GpuAssisted::CheckForDescriptorIndexing(DeviceFeatures enabled_features) const {
     bool result =
         (IsExtEnabled(device_extensions.vk_ext_descriptor_indexing) &&
@@ -315,6 +370,19 @@ void GpuAssisted::PostCallRecordCreateDevice(VkPhysicalDevice physicalDevice, co
         bindings.push_back(binding);
     }
     UtilPostCallRecordCreateDevice(pCreateInfo, bindings, device_gpu_assisted, device_gpu_assisted->phys_dev_props);
+    auto buffer_ci = LvlInitStruct<VkBufferCreateInfo>();
+    buffer_ci.size = device_gpu_assisted->output_buffer_size;
+    buffer_ci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+
+    VmaAllocationCreateInfo alloc_create_info = {};
+    alloc_create_info.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
+    vmaFindMemoryTypeIndexForBufferInfo(device_gpu_assisted->vmaAllocator, &buffer_ci, &alloc_create_info,
+                                        &device_gpu_assisted->output_buffer_mem_type);
+
+    alloc_create_info.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+    vmaFindMemoryTypeIndexForBufferInfo(device_gpu_assisted->vmaAllocator, &buffer_ci, &alloc_create_info,
+                                        &device_gpu_assisted->input_buffer_mem_type);
+
     CreateAccelerationStructureBuildValidationState(device_gpu_assisted);
 }
 
@@ -1025,12 +1093,12 @@ void GpuAssisted::PostCallRecordCreatePipelineLayout(VkDevice device, const VkPi
 
 // Free the device memory and descriptor set(s) associated with a command buffer.
 void GpuAssisted::DestroyBuffer(GpuAssistedBufferInfo &buffer_info) {
-    vmaDestroyBuffer(vmaAllocator, buffer_info.output_mem_block.buffer, buffer_info.output_mem_block.allocation);
+    DestroyBuffer(buffer_info.output_mem_block);
     if (buffer_info.di_input_mem_block.buffer) {
-        vmaDestroyBuffer(vmaAllocator, buffer_info.di_input_mem_block.buffer, buffer_info.di_input_mem_block.allocation);
+        DestroyBuffer(buffer_info.di_input_mem_block);
     }
     if (buffer_info.bda_input_mem_block.buffer) {
-        vmaDestroyBuffer(vmaAllocator, buffer_info.bda_input_mem_block.buffer, buffer_info.bda_input_mem_block.allocation);
+        DestroyBuffer(buffer_info.bda_input_mem_block);
     }
     if (buffer_info.desc_set != VK_NULL_HANDLE) {
         desc_set_manager->PutBackDescriptorSet(buffer_info.desc_pool, buffer_info.desc_set);
@@ -1486,15 +1554,14 @@ void GpuAssisted::UpdateInstrumentationBuffer(CMD_BUFFER_STATE_GPUAV *cb_node) {
     uint32_t *data;
     for (auto &buffer_info : cb_node->gpuav_buffer_list) {
         if (buffer_info.di_input_mem_block.update_at_submit.size() > 0) {
-            VkResult result =
-                vmaMapMemory(vmaAllocator, buffer_info.di_input_mem_block.allocation, reinterpret_cast<void **>(&data));
+            VkResult result = MapBufferMemory(buffer_info.di_input_mem_block, reinterpret_cast<void **>(&data));
             if (result == VK_SUCCESS) {
                 for (const auto &update : buffer_info.di_input_mem_block.update_at_submit) {
                     if (update.second->updated) {
                         SetDescriptorInitialized(data, update.first, update.second);
                     }
                 }
-                vmaUnmapMemory(vmaAllocator, buffer_info.di_input_mem_block.allocation);
+                UnmapBufferMemory(buffer_info.di_input_mem_block);
             }
         }
     }
@@ -1959,24 +2026,24 @@ void GpuAssisted::AllocateValidationResources(const VkCommandBuffer cmd_buffer, 
 
     // Allocate memory for the output block that the gpu will use to return any error information
     GpuAssistedDeviceMemoryBlock output_block = {};
-    VkBufferCreateInfo buffer_info = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    VkBufferCreateInfo buffer_info = LvlInitStruct<VkBufferCreateInfo>();
     buffer_info.size = output_buffer_size;
     buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
     VmaAllocationCreateInfo alloc_info = {};
     alloc_info.usage = VMA_MEMORY_USAGE_GPU_TO_CPU;
-    result = vmaCreateBuffer(vmaAllocator, &buffer_info, &alloc_info, &output_block.buffer, &output_block.allocation, nullptr);
+    result = CreateBuffer(output_block, buffer_info, alloc_info, output_buffer_mem_type);
     if (result != VK_SUCCESS) {
-        ReportSetupProblem(device, "Unable to allocate device memory.  Device could become unstable.");
+        ReportSetupProblem(device, "Unable to allocate buffer.  Device could become unstable.");
         aborted = true;
         return;
     }
 
     // Clear the output block to zeros so that only error information from the gpu will be present
     uint32_t *data_ptr;
-    result = vmaMapMemory(vmaAllocator, output_block.allocation, reinterpret_cast<void **>(&data_ptr));
+    result = MapBufferMemory(output_block, reinterpret_cast<void **>(&data_ptr));
     if (result == VK_SUCCESS) {
         memset(data_ptr, 0, output_buffer_size);
-        vmaUnmapMemory(vmaAllocator, output_block.allocation);
+        UnmapBufferMemory(output_block);
     }
 
     GpuAssistedDeviceMemoryBlock di_input_block = {}, bda_input_block = {};
@@ -2122,10 +2189,9 @@ void GpuAssisted::AllocateValidationResources(const VkCommandBuffer cmd_buffer, 
             }
             alloc_info.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
             buffer_info.size = words_needed * 4;
-            result = vmaCreateBuffer(vmaAllocator, &buffer_info, &alloc_info, &di_input_block.buffer, &di_input_block.allocation,
-                                     nullptr);
+            result = CreateBuffer(di_input_block, buffer_info, alloc_info, input_buffer_mem_type);
             if (result != VK_SUCCESS) {
-                ReportSetupProblem(device, "Unable to allocate device memory.  Device could become unstable.");
+                ReportSetupProblem(device, "Unable to create input buffer.  Device could become unstable.");
                 aborted = true;
                 return;
             }
@@ -2133,7 +2199,12 @@ void GpuAssisted::AllocateValidationResources(const VkCommandBuffer cmd_buffer, 
             // Populate input buffer first with the sizes of every descriptor in every set, then with whether
             // each element of each descriptor has been written or not.  See gpu_validation.md for a more thourough
             // outline of the input buffer format
-            result = vmaMapMemory(vmaAllocator, di_input_block.allocation, reinterpret_cast<void **>(&data_ptr));
+            result = MapBufferMemory(di_input_block, reinterpret_cast<void **>(&data_ptr));
+            if (result != VK_SUCCESS) {
+                ReportSetupProblem(device, "Unable to map input buffer.  Device could become unstable.");
+                aborted = true;
+                return;
+            }
             memset(data_ptr, 0, static_cast<size_t>(buffer_info.size));
 
             // Descriptor indexing needs the number of descriptors at each binding.
@@ -2258,8 +2329,7 @@ void GpuAssisted::AllocateValidationResources(const VkCommandBuffer cmd_buffer, 
                     }
                 }
             }
-            vmaUnmapMemory(vmaAllocator, di_input_block.allocation);
-
+            UnmapBufferMemory(di_input_block);
             di_input_desc_buffer_info.range = (words_needed * 4);
             di_input_desc_buffer_info.buffer = di_input_block.buffer;
             di_input_desc_buffer_info.offset = 0;
@@ -2293,15 +2363,14 @@ void GpuAssisted::AllocateValidationResources(const VkCommandBuffer cmd_buffer, 
         uint32_t words_needed = (num_buffers + 3) + (num_buffers + 2);
         alloc_info.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
         buffer_info.size = words_needed * 8;  // 64 bit words
-        result =
-            vmaCreateBuffer(vmaAllocator, &buffer_info, &alloc_info, &bda_input_block.buffer, &bda_input_block.allocation, nullptr);
+        result = CreateBuffer(bda_input_block, buffer_info, alloc_info, input_buffer_mem_type);
         if (result != VK_SUCCESS) {
             ReportSetupProblem(device, "Unable to allocate device memory.  Device could become unstable.");
             aborted = true;
             return;
         }
         uint64_t *bda_data;
-        result = vmaMapMemory(vmaAllocator, bda_input_block.allocation, reinterpret_cast<void **>(&bda_data));
+        result = MapBufferMemory(bda_input_block, reinterpret_cast<void **>(&bda_data));
         uint32_t address_index = 1;
         uint32_t size_index = 3 + num_buffers;
         memset(bda_data, 0, static_cast<size_t>(buffer_info.size));
@@ -2315,7 +2384,7 @@ void GpuAssisted::AllocateValidationResources(const VkCommandBuffer cmd_buffer, 
         }
         bda_data[address_index] = UINTPTR_MAX;
         bda_data[size_index] = 0;
-        vmaUnmapMemory(vmaAllocator, bda_input_block.allocation);
+        UnmapBufferMemory(bda_input_block);
 
         bda_input_desc_buffer_info.range = (words_needed * 8);
         bda_input_desc_buffer_info.buffer = bda_input_block.buffer;
@@ -2361,9 +2430,9 @@ void GpuAssisted::AllocateValidationResources(const VkCommandBuffer cmd_buffer, 
         aborted = true;
     }
     if (aborted) {
-        vmaDestroyBuffer(vmaAllocator, di_input_block.buffer, di_input_block.allocation);
-        vmaDestroyBuffer(vmaAllocator, bda_input_block.buffer, bda_input_block.allocation);
-        vmaDestroyBuffer(vmaAllocator, output_block.buffer, output_block.allocation);
+        if (di_input_block.buffer) DestroyBuffer(di_input_block);
+        if (bda_input_block.buffer) DestroyBuffer(bda_input_block);
+        if (output_block.buffer) DestroyBuffer(output_block);
         return;
     }
 }

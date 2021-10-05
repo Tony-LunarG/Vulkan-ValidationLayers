@@ -30,6 +30,7 @@ class CMD_BUFFER_STATE_GPUAV;
 struct GpuAssistedDeviceMemoryBlock {
     VkBuffer buffer;
     VmaAllocation allocation;
+    VkDeviceMemory memory;
     layer_data::unordered_map<uint32_t, const cvdescriptorset::Descriptor*> update_at_submit;
 };
 
@@ -141,9 +142,12 @@ class GpuAssisted : public ValidationStateTracker {
     uint32_t output_buffer_size;
     bool buffer_oob_enabled;
     bool validate_draw_indirect;
+    bool use_vma = true;
     std::map<VkDeviceAddress, VkDeviceSize> buffer_map;
     GpuAssistedAccelerationStructureBuildValidationState acceleration_structure_validation_state;
     GpuAssistedPreDrawValidationState pre_draw_validation_state;
+    uint32_t output_buffer_mem_type;
+    uint32_t input_buffer_mem_type;
 
     void PreRecordCommandBuffer(VkCommandBuffer command_buffer);
     bool CommandBufferNeedsProcessing(VkCommandBuffer command_buffer);
@@ -168,6 +172,11 @@ class GpuAssisted : public ValidationStateTracker {
   public:
     template <typename T>
     void ReportSetupProblem(T object, const char* const specific_message) const;
+    VkResult CreateBuffer(GpuAssistedDeviceMemoryBlock& memory_block, VkBufferCreateInfo buffer_info,
+                          VmaAllocationCreateInfo alloc_info, uint32_t mem_type_index) const;
+    VkResult MapBufferMemory(GpuAssistedDeviceMemoryBlock memory_block, void** data_ptr) const;
+    void UnmapBufferMemory(GpuAssistedDeviceMemoryBlock memory_block) const;
+    void DestroyBuffer(GpuAssistedDeviceMemoryBlock memory_block) const;
     bool CheckForDescriptorIndexing(DeviceFeatures enabled_features) const;
     void PreCallRecordCreateDevice(VkPhysicalDevice gpu, const VkDeviceCreateInfo* pCreateInfo,
                                    const VkAllocationCallbacks* pAllocator, VkDevice* pDevice, void* modified_create_info) override;

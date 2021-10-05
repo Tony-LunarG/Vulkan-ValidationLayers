@@ -360,14 +360,12 @@ void UtilProcessInstrumentationBuffer(VkQueue queue, CMD_BUFFER_STATE *cb_node, 
             } else {
                 assert(false);
             }
-
-            VkResult result = vmaMapMemory(object_ptr->vmaAllocator, buffer_info.output_mem_block.allocation, (void **)&pData);
+            VkResult result = object_ptr->MapBufferMemory(buffer_info.output_mem_block, reinterpret_cast<void **>(&pData));
             if (result == VK_SUCCESS) {
                 object_ptr->AnalyzeAndGenerateMessages(cb_node->commandBuffer(), queue, buffer_info,
-                                                       operation_index, (uint32_t *)pData);
-                vmaUnmapMemory(object_ptr->vmaAllocator, buffer_info.output_mem_block.allocation);
+                    operation_index, (uint32_t *)pData);
+                object_ptr->UnmapBufferMemory(buffer_info.output_mem_block);
             }
-
             if (buffer_info.pipeline_bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
                 draw_index++;
             } else if (buffer_info.pipeline_bind_point == VK_PIPELINE_BIND_POINT_COMPUTE) {
