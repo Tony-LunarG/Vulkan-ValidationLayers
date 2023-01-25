@@ -1288,13 +1288,18 @@ void GpuAssisted::SetBindingState(uint32_t *data, uint32_t index, const cvdescri
         }
     }
 }
-
+static bool does_uab = false;
 // For the given command buffer, map its debug data buffers and update the status of any update after bind descriptors
 void GpuAssisted::UpdateInstrumentationBuffer(gpuav_state::CommandBuffer *cb_node) {
     uint32_t *data;
     for (const auto &buffer_info : cb_node->di_input_buffer_list) {
         if (buffer_info.update_at_submit.size() > 0) {
-            VkResult result = vmaMapMemory(vmaAllocator, buffer_info.allocation, reinterpret_cast<void **>(&data));
+            if (!does_uab) {
+                printf("HORK Does update_after_bind\n");
+                does_uab = true;
+            }
+            VkResult result =
+                vmaMapMemory(vmaAllocator, buffer_info.allocation, reinterpret_cast<void **>(&data));
             if (result == VK_SUCCESS) {
                 for (const auto &update : buffer_info.update_at_submit) {
                     SetBindingState(data, update.first, update.second);
@@ -1304,6 +1309,8 @@ void GpuAssisted::UpdateInstrumentationBuffer(gpuav_state::CommandBuffer *cb_nod
         }
     }
 }
+
+static uint32_t biggest_di_input_buffer = 0;
 
 void GpuAssisted::PostCallRecordCmdBindDescriptorSets(VkCommandBuffer commandBuffer, VkPipelineBindPoint pipelineBindPoint,
                                                       VkPipelineLayout layout, uint32_t firstSet, uint32_t descriptorSetCount,
@@ -1374,6 +1381,11 @@ void GpuAssisted::PostCallRecordCmdBindDescriptorSets(VkCommandBuffer commandBuf
                 words_needed = 1 + (number_of_sets * 2) + (binding_count * 2) + descriptor_count;
             } else {
                 words_needed = 1 + number_of_sets + binding_count + descriptor_count;
+            }
+            if (words_needed > biggest_di_input_buffer) {
+                printf("HORK Input buffer of size %u words, descriptor indexing = %s\n", words_needed,
+                       descriptor_indexing ? "true" : "false");
+                biggest_di_input_buffer = words_needed;
             }
             VkBufferCreateInfo buffer_info = LvlInitStruct<VkBufferCreateInfo>();
             buffer_info.size = words_needed * 4;
@@ -1970,6 +1982,8 @@ void GpuAssisted::AllocatePreDispatchValidationResources(const GpuAssistedDevice
     DispatchUpdateDescriptorSets(device, buffer_count, desc_writes, 0, nullptr);
 }
 
+static uint32_t num_bda_buffers = 0;
+
 void GpuAssisted::AllocateValidationResources(const VkCommandBuffer cmd_buffer, const VkPipelineBindPoint bind_point,
                                               CMD_TYPE cmd_type, const GpuAssistedCmdIndirectState *indirect_state) {
     if (bind_point != VK_PIPELINE_BIND_POINT_GRAPHICS && bind_point != VK_PIPELINE_BIND_POINT_COMPUTE &&
@@ -2189,6 +2203,10 @@ void GpuAssisted::AllocateValidationResources(const VkCommandBuffer cmd_buffer, 
             // Word 8 | 0 (size of pretend buffer in word 4)
 
             uint32_t num_buffers = static_cast<uint32_t>(address_ranges.size());
+            if (num_buffers > num_bda_buffers) {
+                printf("HORK %u buffer device address buffers\n", num_buffers);
+                num_bda_buffers = num_buffers;
+            }
             uint32_t words_needed = (num_buffers + 3) + (num_buffers + 2);
             buffer_info.size = words_needed * 8;  // 64 bit words
             alloc_info.pool = VK_NULL_HANDLE;

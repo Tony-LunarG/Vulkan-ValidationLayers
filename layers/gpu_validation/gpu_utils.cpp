@@ -465,7 +465,7 @@ void GpuAssistedBase::ProcessCommandBuffer(VkQueue queue, VkCommandBuffer comman
         secondary_cb_node->Process(queue);
     }
 }
-
+static uint32_t submit_count = 0;
 // Issue a memory barrier to make GPU-written data available to host.
 // Wait for the queue to complete execution.
 // Check the debug buffers for all the command buffers that were submitted.
@@ -487,7 +487,19 @@ void GpuAssistedBase::PostCallRecordQueueSubmit(VkQueue queue, uint32_t submitCo
     SubmitBarrier(queue);
 
     DispatchQueueWaitIdle(queue);
-
+    submit_count++;
+    //if (submit_count > 50) {
+    //if (true) {
+    if (false){
+        submit_count = 0;
+        std::string logit = {};
+        char *stats_string;
+        vmaBuildStatsString(vmaAllocator, &stats_string, false);
+        logit += " VMA statistics = ";
+        logit += stats_string;
+        printf("%s\n", logit.c_str());
+        vmaFreeStatsString(vmaAllocator, stats_string);
+    }
     for (uint32_t submit_idx = 0; submit_idx < submitCount; submit_idx++) {
         const VkSubmitInfo *submit = &pSubmits[submit_idx];
         for (uint32_t i = 0; i < submit->commandBufferCount; i++) {
