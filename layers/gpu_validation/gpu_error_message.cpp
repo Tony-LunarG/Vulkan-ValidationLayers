@@ -525,22 +525,23 @@ bool gpuav::Validator::AnalyzeAndGenerateMessages(VkCommandBuffer cmd_buffer, Vk
     return error_found;
 }
 
+
 void gpuav::CommandResources::LogErrorIfAny(gpuav::Validator &validator, VkQueue queue, VkCommandBuffer cmd_buffer,
                                             const uint32_t operation_index) {
-    uint32_t *debug_output_buffer = nullptr;
-    VkResult result =
-        vmaMapMemory(validator.vmaAllocator, output_mem_block.allocation, reinterpret_cast<void **>(&debug_output_buffer));
-    if (result == VK_SUCCESS) {
-        const uint32_t total_words = debug_output_buffer[spvtools::kDebugOutputSizeOffset];
+    //uint32_t *debug_output_buffer = nullptr;
+    //VkResult result =
+    //    vmaMapMemory(validator.vmaAllocator, output_buffer_block.allocation, reinterpret_cast<void **>(&debug_output_buffer));
+    //if (result == VK_SUCCESS) {
+    //    const uint32_t total_words = debug_output_buffer[spvtools::kDebugOutputSizeOffset];
         // A zero here means that the shader instrumentation didn't write anything.
-        if (total_words != 0) {
-            uint32_t *debug_record = &debug_output_buffer[spvtools::kDebugOutputDataOffset];
-            const LogObjectList objlist(queue, cmd_buffer);
-            LogValidationMessage(validator, queue, cmd_buffer, debug_record, operation_index, objlist);
-        }
-        debug_output_buffer[spvtools::kDebugOutputSizeOffset] = 0;
-        vmaUnmapMemory(validator.vmaAllocator, output_mem_block.allocation);
-    }
+    //    if (total_words != 0) {
+    //        uint32_t *debug_record = &debug_output_buffer[spvtools::kDebugOutputDataOffset];
+    //        const LogObjectList objlist(queue, cmd_buffer);
+    //        LogValidationMessage(validator, queue, cmd_buffer, debug_record, operation_index, objlist);
+    //    }
+    //    debug_output_buffer[spvtools::kDebugOutputSizeOffset] = 0;
+    //    vmaUnmapMemory(validator.vmaAllocator, output_mem_block.allocation);
+    //}
 }
 
 bool gpuav::CommandResources::LogValidationMessage(gpuav::Validator &validator, VkQueue queue, VkCommandBuffer cmd_buffer,

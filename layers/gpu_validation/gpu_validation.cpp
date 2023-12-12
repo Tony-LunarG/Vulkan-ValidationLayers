@@ -482,43 +482,45 @@ gpuav::CommandResources gpuav::Validator::AllocateCommandResources(const VkComma
         return CommandResources();
     }
 
-    // Allocate memory for the output block that the gpu will use to return any error information
-    DeviceMemoryBlock output_block = {};
-    VkBufferCreateInfo buffer_info = vku::InitStructHelper();
-    buffer_info.size = output_buffer_size;
-    buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-    VmaAllocationCreateInfo alloc_info = {};
-    alloc_info.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    alloc_info.pool = output_buffer_pool;
-    result = vmaCreateBuffer(vmaAllocator, &buffer_info, &alloc_info, &output_block.buffer, &output_block.allocation, nullptr);
-    if (result != VK_SUCCESS) {
-        ReportSetupProblem(device, "Unable to allocate device memory. Device could become unstable.", true);
-        aborted = true;
-        return CommandResources();
-    }
-
-    uint32_t *output_buffer_ptr;
-    result = vmaMapMemory(vmaAllocator, output_block.allocation, reinterpret_cast<void **>(&output_buffer_ptr));
-    bool uses_robustness = false;
-    if (result == VK_SUCCESS) {
-        memset(output_buffer_ptr, 0, output_buffer_size);
-        if (gpuav_settings.validate_descriptors) {
-            uses_robustness = (enabled_features.robustBufferAccess || enabled_features.robustBufferAccess2 ||
-                               (pipeline_state && pipeline_state->uses_pipeline_robustness));
-            output_buffer_ptr[spvtools::kDebugOutputFlagsOffset] = spvtools::kInstBufferOOBEnable;
+     bool uses_robustness = false;
+    if (cb_node->output_buffer_block.buffer == VK_NULL_HANDLE) {
+        // Allocate memory for the output block that the gpu will use to return any error information
+        VkBufferCreateInfo buffer_info = vku::InitStructHelper();
+        buffer_info.size = output_buffer_size;
+        buffer_info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        VmaAllocationCreateInfo alloc_info = {};
+        alloc_info.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        alloc_info.pool = output_buffer_pool;
+        result = vmaCreateBuffer(vmaAllocator, &buffer_info, &alloc_info, &cb_node->output_buffer_block.buffer, &cb_node->output_buffer_block.allocation, nullptr);
+        if (result != VK_SUCCESS) {
+            ReportSetupProblem(device, "Unable to allocate device memory. Device could become unstable.", true);
+            aborted = true;
+            return CommandResources();
         }
-        vmaUnmapMemory(vmaAllocator, output_block.allocation);
-    } else {
-        ReportSetupProblem(device, "Unable to map device memory allocated for output buffer. Device could become unstable.", true);
-        aborted = true;
-        return CommandResources();
+
+        uint32_t *output_buffer_ptr;
+        result = vmaMapMemory(vmaAllocator, cb_node->output_buffer_block.allocation, reinterpret_cast<void **>(&output_buffer_ptr));
+        if (result == VK_SUCCESS) {
+            memset(output_buffer_ptr, 0, output_buffer_size);
+            if (gpuav_settings.validate_descriptors) {
+                uses_robustness = (enabled_features.robustBufferAccess || enabled_features.robustBufferAccess2 ||
+                                   (pipeline_state && pipeline_state->uses_pipeline_robustness));
+                output_buffer_ptr[spvtools::kDebugOutputFlagsOffset] = spvtools::kInstBufferOOBEnable;
+            }
+            vmaUnmapMemory(vmaAllocator, cb_node->output_buffer_block.allocation);
+        } else {
+            ReportSetupProblem(device, "Unable to map device memory allocated for output buffer. Device could become unstable.",
+                               true);
+            aborted = true;
+            return CommandResources();
+        }
     }
 
     // Write the descriptor that will be used to check for OOB accesses
     {
         VkDescriptorBufferInfo output_desc_buffer_info = {};
         output_desc_buffer_info.range = output_buffer_size;
-        output_desc_buffer_info.buffer = output_block.buffer;
+        output_desc_buffer_info.buffer = cb_node->output_buffer_block.buffer;
         output_desc_buffer_info.offset = 0;
 
         std::array<VkWriteDescriptorSet, 3> desc_writes = {};
@@ -591,7 +593,8 @@ gpuav::CommandResources gpuav::Validator::AllocateCommandResources(const VkComma
     if (pipeline_state && pipeline_layout_handle == VK_NULL_HANDLE) {
         ReportSetupProblem(device, "Unable to find pipeline layout to bind debug descriptor set. Aborting GPU-AV");
         aborted = true;
-        vmaDestroyBuffer(vmaAllocator, output_block.buffer, output_block.allocation);
+        // TODO TODO TODO - Make sure this gets destroyed at destroy command buffer time
+        //vmaDestroyBuffer(vmaAllocator, output_block.buffer, output_block.allocation);
     }
 
     // It is possible to have no descriptor sets bound, for example if using push constants.
@@ -599,7 +602,6 @@ gpuav::CommandResources gpuav::Validator::AllocateCommandResources(const VkComma
         cb_node->di_input_buffer_list.size() > 0 ? uint32_t(cb_node->di_input_buffer_list.size()) - 1 : vvl::kU32Max;
 
     CommandResources cmd_resources;
-    cmd_resources.output_mem_block = output_block;
     cmd_resources.output_buffer_desc_set = output_buffer_desc_set[0];
     cmd_resources.output_buffer_desc_pool = output_buffer_desc_pool;
     cmd_resources.pipeline_bind_point = bind_point;
@@ -661,7 +663,7 @@ std::unique_ptr<gpuav::CommandResources> gpuav::Validator::AllocatePreDrawIndire
     const uint32_t buffer_count = 3;
     VkDescriptorBufferInfo buffer_infos[buffer_count] = {};
     // Error output buffer
-    buffer_infos[0].buffer = draw_resources->output_mem_block.buffer;
+    buffer_infos[0].buffer = cb_node->output_buffer_block.buffer;
     buffer_infos[0].offset = 0;
     buffer_infos[0].range = VK_WHOLE_SIZE;
     buffer_infos[1].buffer = count_buffer;
@@ -838,7 +840,7 @@ std::unique_ptr<gpuav::CommandResources> gpuav::Validator::AllocatePreDispatchIn
     const uint32_t buffer_count = 2;
     VkDescriptorBufferInfo buffer_infos[buffer_count] = {};
     // Error output buffer
-    buffer_infos[0].buffer = dispatch_resources->output_mem_block.buffer;
+    buffer_infos[0].buffer = cb_node->output_buffer_block.buffer;
     buffer_infos[0].offset = 0;
     buffer_infos[0].range = VK_WHOLE_SIZE;
     buffer_infos[1].buffer = indirect_buffer;
@@ -910,14 +912,20 @@ std::unique_ptr<gpuav::CommandResources> gpuav::Validator::AllocatePreTraceRaysV
         return std::make_unique<PreTraceRaysResources>();
     }
 
+    auto cb_node = GetWrite<CommandBuffer>(cmd_buffer);
+    if (!cb_node) {
+        ReportSetupProblem(device, "Unrecognized command buffer");
+        aborted = true;
+        return std::make_unique<PreTraceRaysResources>();
+    }
+
     constexpr uint32_t buffer_count = 1;
     VkDescriptorBufferInfo buffer_infos[buffer_count] = {};
+    VkWriteDescriptorSet desc_writes[buffer_count] = {};
     // Error output buffer
-    buffer_infos[0].buffer = trace_rays_resources->output_mem_block.buffer;
+    buffer_infos[0].buffer = cb_node->output_buffer_block.buffer;
     buffer_infos[0].offset = 0;
     buffer_infos[0].range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet desc_writes[buffer_count] = {};
     for (uint32_t i = 0; i < buffer_count; i++) {
         desc_writes[i] = vku::InitStructHelper();
         desc_writes[i].dstBinding = i;
@@ -927,13 +935,6 @@ std::unique_ptr<gpuav::CommandResources> gpuav::Validator::AllocatePreTraceRaysV
         desc_writes[i].dstSet = trace_rays_resources->desc_set;
     }
     DispatchUpdateDescriptorSets(device, buffer_count, desc_writes, 0, nullptr);
-
-    auto cb_node = GetWrite<CommandBuffer>(cmd_buffer);
-    if (!cb_node) {
-        ReportSetupProblem(device, "Unrecognized command buffer");
-        aborted = true;
-        return std::make_unique<PreTraceRaysResources>();
-    }
 
     // Save current ray tracing pipeline state
     RestorablePipelineState restorable_state(cb_node.get(), VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR);

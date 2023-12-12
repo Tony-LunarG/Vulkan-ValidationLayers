@@ -151,8 +151,6 @@ class CommandResources {
     virtual bool LogValidationMessage(gpuav::Validator &validator, VkQueue queue, VkCommandBuffer cmd_buffer,
                                       const uint32_t *debug_record, const uint32_t operation_index, const LogObjectList &objlist);
 
-    DeviceMemoryBlock output_mem_block;
-
     VkDescriptorSet output_buffer_desc_set = VK_NULL_HANDLE;
     VkDescriptorPool output_buffer_desc_pool = VK_NULL_HANDLE;
     VkPipelineBindPoint pipeline_bind_point = VK_PIPELINE_BIND_POINT_MAX_ENUM;
@@ -218,11 +216,13 @@ class CommandBuffer : public gpu_tracker::CommandBuffer {
     std::vector<DescBindingInfo> di_input_buffer_list;
     std::vector<AccelerationStructureBuildValidationInfo> as_validation_buffers;
     VkBuffer current_bindless_buffer = VK_NULL_HANDLE;
-
+    DeviceMemoryBlock output_buffer_block = {};
+   
     CommandBuffer(Validator *ga, VkCommandBuffer cb, const VkCommandBufferAllocateInfo *pCreateInfo, const vvl::CommandPool *pool);
     ~CommandBuffer();
 
     bool NeedsProcessing() const final { return !per_command_resources.empty() || has_build_as_cmd; }
+    void LogErrorIfAny(gpuav::Validator &validator, VkQueue queue, VkCommandBuffer cmd_buffer, const uint32_t operation_index);
     void Process(VkQueue queue, const Location &loc) final;
 
     void Destroy() final;

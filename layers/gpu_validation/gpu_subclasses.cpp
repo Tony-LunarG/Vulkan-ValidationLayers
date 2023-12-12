@@ -18,6 +18,7 @@
 #include "gpu_subclasses.h"
 #include "gpu_validation.h"
 #include "gpu_vuids.h"
+#include "spirv-tools/instrument.hpp"
 #include "drawdispatch/descriptor_validator.h"
 
 gpuav::Buffer::Buffer(ValidationStateTracker *dev_data, VkBuffer buff, const VkBufferCreateInfo *pCreateInfo,
@@ -161,6 +162,25 @@ void gpuav::CommandBuffer::Process(VkQueue queue, const Location &loc) {
         uint32_t compute_index = 0;
         uint32_t ray_trace_index = 0;
 
+        uint32_t *debug_output_buffer = nullptr;
+        VkResult result =
+            vmaMapMemory(device_state->vmaAllocator, output_buffer_block.allocation, reinterpret_cast<void **>(&debug_output_buffer));
+        if (result == VK_SUCCESS) {
+            const uint32_t total_words = debug_output_buffer[spvtools::kDebugOutputSizeOffset];
+            // A zero here means that the shader instrumentation didn't write anything.
+            if (total_words != 0) {
+                uint32_t *debug_record = &debug_output_buffer[spvtools::kDebugOutputDataOffset];
+                while (debug_record[spvtools::kInstCommonOutSize] > 0) {
+                    auto cmd_info = per_command_resources[2].get();
+                    const LogObjectList objlist(queue, commandBuffer());
+                    cmd_info->LogValidationMessage(*device_state, queue, commandBuffer(), debug_record, 2, objlist);
+                    debug_record += debug_record[spvtools::kInstCommonOutSize];
+                }
+            }
+            debug_output_buffer[spvtools::kDebugOutputSizeOffset] = 0;
+            vmaUnmapMemory(device_state->vmaAllocator, output_buffer_block.allocation);
+        }
+
         for (auto &cmd_info : per_command_resources) {
             uint32_t operation_index = 0;
             if (cmd_info->pipeline_bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
@@ -172,7 +192,7 @@ void gpuav::CommandBuffer::Process(VkQueue queue, const Location &loc) {
             } else {
                 assert(false);
             }
-            cmd_info->LogErrorIfAny(*device_state, queue, commandBuffer(), operation_index);
+            //cmd_info->LogErrorIfAny(*device_state, queue, commandBuffer(), operation_index);
         }
 
         // For each vkCmdBindDescriptorSets()...
