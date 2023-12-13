@@ -99,7 +99,7 @@ void gpuav::Validator::CreateDevice(const VkDeviceCreateInfo *pCreateInfo) {
     // Set up a stub implementation of the descriptor heap in case we abort.
     desc_heap.emplace(*this, 0);
     bindings_.push_back(binding);
-    for (auto i = 1; i < 3; i++) {
+    for (auto i = 1; i < 4; i++) {
         binding.binding = i;
         bindings_.push_back(binding);
     }
